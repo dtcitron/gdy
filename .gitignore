@@ -1,0 +1,5 @@
+# ignore pyc files
+*.pyc
+
+# ignore the old version of GDy with bad naming conventions
+GDy_old.py
