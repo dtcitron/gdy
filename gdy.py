@@ -20,7 +20,8 @@
 
 #  Updates for later:
 #  1. Need to be able to properly seed the rng used for updates
-#  2. Look at code in graveyard
+#  2. Change certain functions into class methods
+#  3. Look at code in graveyard
 
 import cPickle as pickle
 import networkx as nx
