@@ -9,6 +9,7 @@ poisson or heavy-tailed networks) that represent the connectivity between indivi
 a population susceptible to disease.
 
 This repository contains:
+
   gdy.py - The Python package, containing everything needed to simulate SIRS-type
            disease models and produce visualizations of the phase diagram
            
