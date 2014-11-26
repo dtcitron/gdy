@@ -3,3 +3,6 @@
 
 # ignore the old version of GDy with bad naming conventions
 GDy_old.py
+
+# ignore code graveyard for deterministic dynamics
+gdy_determ.py

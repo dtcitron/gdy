@@ -1,1178 +1,776 @@
 #
-#  GDy.py
+#  gdy.py
 #  
 #
 #  Created by Daniel Citron on 9/06/13.
+#  Most recent update: 11/24/14
 #   
-#  GDy = Graph Dynamics
-#  Building upon the code from before (SIRS, SIS), here's a more elegant way to
-#   implement disease dynamics on networks with large numbers of nodes
-#   This code will work best for large graphs with low density of edges, since
-#   it relies on sparse matrixes for best efficiency.
-
+#  gdy = Graph Dynamics
+#  
+#  This module allows us to implement discrete-time stochastic 
+#  simulations of SIR-type disease dynamics.  Most generally,
+#  we allow for SIRS dynamics on an arbitrary social network.
+#  By properly defining the model parameters, we can simulate
+#  SI, SIR, SIS dynamics.
+#
+#  For large networks (>500 nodes), we use Scipy's sparse matrix
+#  methods to perform the simulations.  This has been found to
+#  greatly improve the speed of the simulations.  This works best
+#  for graphs with a low density of edges.
 
 import cPickle as pickle
 import networkx as nx
-import random, scipy, numpy, sets
+import random
+import scipy
+import numpy as np
+import sets
 import matplotlib.pyplot as plt
 from collections import defaultdict, Counter
 from time import asctime
 import scipy.sparse as ssp
 from matplotlib.pyplot import pcolormesh
 
-###--------------------------------------------------------------------------------------------------------
-# Define the substrate object, which contains the adjacency matrix and node status info
-###--------------------------------------------------------------------------------------------------------
 
 class Substrate:
+    """
+    Substrate defines a class that keeps track of network connectivity
+    which contains the adjacency matrix and node status. Simulations 
+    are performed by using methods to operate on a Substrate object.
+    These methods look at the adjacency matrix and the status of
+    each node in the network.  The adjacency matrix is considered fixed,
+    but the statuses of the nodes is what varies over time.
+    
+    At each discrete time step, SIRS transition probabilities are 
+    calculated for each node based on the adjacency matrix, current
+    node statuses, and the given model parameters
+    
+    To create a Substrate object, one simply needs a networkx graph.
+    The Substrate object allows easy storage of node status (in a 
+    status vector) and defines methods for manipulating nodes' statuses.
+    This in turn enables discrete-time stochastic simulations.
+    
+    Node status...
+        = 0 : node is Susceptible to infection
+        = 1 : node is Infected, can infect neighbors
+        = 2 : node is Recovered, cannot become infected
+        
+    The model parameters relevant to SIRS-type models are...
+        beta_ - beta: per-neighbor rate of infection
+        gamma_ - gamma: rate of recovery
+        rho_ - rho: rate of loss of immunity ('waning')
+    """
 
     def __init__(self, G):
+        """
+        Create a Substrate object out of a networkx graph
+        Inputs:
+            G : networkx graph - defines connectivity between nodes        
+        """
         n = len(G)
-        self.status = numpy.zeros(n)
-        # create matrix representation of adjacency matrix
+        # Create vector representation of node statuses
+        # Initialize all nodes as "susceptible"
+        self.status = np.zeros(n)
+        # Create matrix representation of adjacency matrix
+        # If the number of nodes > 500, use sparse matrices
         if n > 500:
             self.A = nx.to_scipy_sparse_matrix(G)
         else:
             self.A = nx.adjacency_matrix(G)
 
+###----------------------------------------------------------------------------
+#   Methods for manipulating the statuses of nodes
+###----------------------------------------------------------------------------
 
-# Define methods for manipulating the status of individual or groups of nodes
-    def GetStatus(self):
+    def getstatus(self):
         """Return the status of the substrate object"""
-        return numpy.copy(self.status)
+        return np.copy(self.status)
 
-    
-    def SetStatus(self, newstatus):
+    def setstatus(self, newstatus):
         """Set the status of the substrate object"""
         if len(self.status) == len(newstatus):
             self.status = newstatus
         else: print 'Error: newstatus has wrong size'
 
-
-    def InitStatus(self):
+    def initstatus(self):
         """Reset status (everyone susceptible)"""
-        self.SetStatus(numpy.zeros(len(self.status)))
+        self.setstatus(np.zeros(len(self.status)))
 
-
-    def InfectN(self, N = 1):
+    def infect_n(self, N = 1):
         """ Infect N randomly chosen nodes. """
         nn = random.sample(range(len(self.status)), N)
         for n in nn:
             self.status[n] = 1
     
-    
-    def InfectGroup(self, nn = [1]):
+    def infectgroup(self, nn = [1]):
         """Infect a specific group of nodes """
         for n in nn:
             self.status[n] = 1
     
-    
-    def SuscN(self, N = 1):
+    def susc_n(self, N = 1):
         """ Send N randomly chosen nodes to susceptible. """
         nn = random.sample(range(len(self.status)), N)
         for n in nn:
             self.status[n] = 0
     
-    
-    def SuscGroup(self, nn = [1]):
+    def suscgroup(self, nn = [1]):
         """ Send specific group of nodes to susceptible """
         for n in nn:
             self.status[n] = 0
 
-
-    def RecoverN(self, N = 1):
+    def rec_n(self, N = 1):
         """ Recover N randomly chosen nodes. """
         nn = random.sample(range(len(self.status)), N)
         for n in nn:
             self.status[n] = 2
 
-
-    def RecoverGroup(self, nn = [1]):
+    def recgroup(self, nn = [1]):
         """ Infect a specific group of nodes """
         for n in nn:
             self.status[n] = 2
 
+###----------------------------------------------------------------------------
+#   Methods for measuring the properties of the graph
+###----------------------------------------------------------------------------
 
-# Define methods for measuring the properties of the graph
     def degree(self):
         """Return the degree sequence of the graph"""
-        return numpy.array(self.A.sum(0))[0]
+        return np.array(self.A.sum(0))[0]
         
-        
-    def Infecteds(self):
+    def infecteds(self):
         """Return list of infected nodes"""
-        return numpy.where(self.status == 1)[0]
-
-
-    def Susceptibles(self):
+        return np.where(self.status == 1)[0]
+        
+    def susceptibles(self):
         """Return list of susceptible nodes"""
-        return numpy.where(self.status == 0)[0]
+        return np.where(self.status == 0)[0]
 
-
-    def Recovereds(self):
+    def recovereds(self):
         """Return list of infected nodes"""
-        return numpy.where(self.status == 2)[0]
+        return np.where(self.status == 2)[0]
         
-        
-        
-    def DetermS(self, t1 = 0, t2 = 0):
+###----------------------------------------------------------------------------
+#   Methods for implementing discrete-time stochastic simulation
+###----------------------------------------------------------------------------        
+
+    def SISupdate(self, beta_, gamma_, nsteps = 1, 
+                  update = True, ret = False):
         """
-        For deterministic dynamics, return the infected nodes
-        """
-        return numpy.where(self.status == 0)[0]
-         
-        
-    def DetermI(self, t1, t2):
-        """
-        For deterministic dynamics, return the infected nodes
-        """
-        return numpy.where(self.status > t2)[0]
-        
-        
-    def DetermR(self, t1, t2):
-        """
-        For deterministic dynamics, return te recovered nodes
-        """
-        return numpy.array(list(set(numpy.where(self.status >0)[0]) & set(numpy.where(self.status <= t2)[0])))
-        
-        
-# Define methods for conducting the dynamics
-    def SISupdate(self, beta, gam, nsteps = 1, update = True, ret = False):
-        """
-        Conduct n updates of status using SIS dynamics
-        beta, gam are the SIS dynamics parameters
-        update - set to True if we want to actually change the status between time steps
-        r - set to True if we want to return the status vector at the end
+        Perform SIS simulation for a fixed number of time steps
+        Inputs:
+            beta_, gamma_ : SIS dynamics parameters
+            nsteps : integer number of time steps
+            update : set to True if we want the Substrate's status to be
+                     updated after the simulation (usually the case)
+            ret    : set to True if we want to return the status vector
+                   at the end of the simulation
+        Outputs:
+            This method returns the final status if ret == True
         """
         nnodes = len(self.status)
-        oldstatus = self.GetStatus() # store old status
+        oldstatus = self.getstatus()
         for i in range(nsteps):
-            r = numpy.random.random(nnodes) # vector of random numbers for each node
-            # count the number of infected neighbors, allow for possibility of using sparse array
-            if ssp.issparse(self.A): # scipy sparse array
+            r = np.random.random(nnodes)
+            # Count the number of infected neighbors
+            if ssp.issparse(self.A): 
+                # scipy sparse array
                 I = self.A * (self.status == 1)
-            else: # dense numpy array
-                I = numpy.array(numpy.dot(self.A, self.status == 1))[0]
-            newstatus = numpy.copy(self.status) # create an array to store the new status
-            newstatus[(self.status == 0) & (r < 1-numpy.exp(-beta*I))] = 1 # condition for susceptible nodes becoming infected
-            newstatus[(self.status == 1) & (r < gam)] = 0 # condition for infected nodes becoming susceptible again
-            self.SetStatus(newstatus)
-        if not update: self.SetStatus(oldstatus) # return the Substrate to the position from the start...
+            else: 
+                # dense numpy array
+                I = np.array(np.dot(self.A, self.status == 1))[0]
+            newstatus = np.copy(self.status)
+            # Calculate infection transition probabilities P(S->I)
+            newstatus[(self.status == 0) & (r < 1-np.exp(-beta_*I))] = 1 
+            # Calculate recovery transition probabilities P(I->S)
+            newstatus[(self.status == 1) & (r < gamma_)] = 0
+            self.setstatus(newstatus)
+        if not update: self.setstatus(oldstatus)
         if ret: return self.status
         
-        
-    def SIRSupdate(self, beta, gam, rho, nsteps = 1, update = True, ret = False):
+    def SIRSupdate(self, beta_, gamma_, rho_, nsteps = 1, 
+                   update = True, ret = False):
         """
-        Conduct n updates of status using SIRS dynamics
-        beta, gam, rho are the SIS dynamics parameters
-        update - set to True if we want to actually change the status between time steps
-        ret - set to True if we want to return the status vector at the end
+        Perform SIRS simulation for a fixed number of time steps
+        Inputs:
+            beta_, gamma_, rho_ : SIRS dynamics parameters
+            nsteps : integer number of time steps
+            update : set to True if we want the Substrate's status to be
+                     updated after the simulation (usually the case)
+            ret    : set to True if we want to return the status vector
+                     at the end of the simulation
+        Outputs:
+            This method returns the final status if ret == True
         """
         nnodes = len(self.status)
-        oldstatus = self.GetStatus() # store old status
+        oldstatus = self.getstatus()
         for i in range(nsteps):
-            r = numpy.random.random(nnodes) # vector of random numbers for each node
-            # count the number of infected neighbors, allow for possibility of using sparse array
-            if ssp.issparse(self.A): # scipy sparse array
+            r = np.random.random(nnodes) 
+            # Count the number of infected neighbors
+            if ssp.issparse(self.A): 
+                # scipy sparse array
                 I = self.A * (self.status == 1)
-            else: # dense numpy array
-                I = numpy.array(numpy.dot(self.A, self.status == 1))[0]
-            newstatus = numpy.copy(self.status) # create an array to store the new status
-            newstatus[(self.status == 0) & (r < 1-numpy.exp(-beta*I))] = 1 # condition for susceptible nodes becoming infected
-            newstatus[(self.status == 1) & (r < gam)] = 2 # condition for infected nodes becoming susceptible again
-            newstatus[(self.status == 2) & (r < rho)] = 0 # condition for recovered nodes' waning immunity
-            self.SetStatus(newstatus)
-        if not update: self.SetStatus(oldstatus) # return the Substrate to the position from the start...
+            else: 
+                # dense numpy array
+                I = np.array(np.dot(self.A, self.status == 1))[0]
+            newstatus = np.copy(self.status)
+            # Calculate infection transition probabilities P(S->I)
+            newstatus[(self.status == 0) & (r < 1-np.exp(-beta_*I))] = 1
+            # Calculate recovery transition probabilities P(I->R)
+            newstatus[(self.status == 1) & (r < gamma_)] = 2
+            # Calculate waning transition probabilities P(R->S)
+            newstatus[(self.status == 2) & (r < rho_)] = 0
+            self.setstatus(newstatus)
+        if not update: self.setstatus(oldstatus)
         if ret: return self.status
 
 
-# Define methods for conducting the dynamics, deterministic recovery
-    def PrepareDeterm(self, tau, tau2 = 0):
-        """
-        Change the status vector to reflect the deterministic dynamics
-        After initially infecting using S.InfectN(), 
-        run this to set the status of all initial infecteds to tau
-        """
-        self.status[self.status != 0] = tau + tau2
-        
-        
+###----------------------------------------------------------------------------
+# The following functions are ways to make measurements of the 
+# underlying network inside a Substrate object.
+###----------------------------------------------------------------------------
 
-    def SISdeterm(self, r, tau, nsteps = 1, update = True, ret = False):
-        """
-        Conduct n updates of status using SIS dynamics
-        beta - is the SIS dynamics parameter
-        tau - number of time steps that nodes remain infected
-        update - set to True if we want to actually change the status between time steps
-        r - set to True if we want to return the status vector at the end
-        """
-        nnodes = len(self.status)
-        oldstatus = self.GetStatus() # store old status
-        for i in range(nsteps):
-            rv = numpy.random.random(nnodes) # vector of random numbers for each node
-            # count the number of infected neighbors, allow for possibility of using sparse array
-            if ssp.issparse(self.A): # scipy sparse array
-                I = self.A * (self.status > 0)
-            else: # dense numpy array
-                I = numpy.array(numpy.dot(self.A, self.status > 0))[0]
-            newstatus = numpy.copy(self.status) # create an array to store the new status
-            newstatus[(self.status == 0) & (rv < r*I)] = tau # condition for susceptible nodes becoming infected
-            newstatus[(self.status > 0)] -= 1 # condition for infected nodes becoming susceptible again
-            self.SetStatus(newstatus)
-        if not update: self.SetStatus(oldstatus) # return the Substrate to the position from the start...
-        if ret: return self.status
-        
-        
-        
-    def SIRSdeterm(self, r, tau1, tau2, nsteps = 1, update = True, ret = False):
-        """
-        Conduct n updates of status using SIS dynamics
-        beta - is the SIS dynamics parameter
-        tau1 - number of time steps that nodes remain infected
-        tau2 - number of time steps that nodes remain recovered
-        update - set to True if we want to actually change the status between time steps
-        r - set to True if we want to return the status vector at the end
-        """
-        nnodes = len(self.status)
-        oldstatus = self.GetStatus() # store old status
-        for i in range(nsteps):
-            rv = numpy.random.random(nnodes) # vector of random numbers for each node
-            # count the number of infected neighbors, allow for possibility of using sparse array
-            if ssp.issparse(self.A): # scipy sparse array
-                I = self.A * (self.status > tau2)
-            else: # dense numpy array
-                I = numpy.array(numpy.dot(self.A, self.status > tau2))[0]
-            newstatus = numpy.copy(self.status) # create an array to store the new status
-            newstatus[(self.status == 0) & (rv < r*I)] = tau1 + tau2 # condition for susceptible nodes becoming infected
-            newstatus[(self.status > 0)] -= 1 # condition for infected nodes becoming susceptible again
-            self.SetStatus(newstatus)
-        if not update: self.SetStatus(oldstatus) # return the Substrate to the position from the start...
-        if ret: return self.status
-
-
-###--------------------------------------------------------------------------------------------------------
-# Methods for making measurements of the graph
-###--------------------------------------------------------------------------------------------------------
-
-def Khisto(s):
+def degree_dist(s):
     """
-    Degree distribution histogram of network
-    s - network substrate
+    Calculate the degree distribution of a Substrate
+    Inputs:
+        s : Substrate object
+    Outputs:
+        Return a Counter histogram {degree:number of nodes with degree}
     """
     return Counter(s.degree())
 
-
-def MeanK(s):
+def mean_degree(s):
     """
-    Return mean degree of network
-    s - network substrate
+    Calculate the mean degree of a Substrate
+    Inputs:
+        s: Substrate object
+    Outputs:
+        Return mean degree of Substrate
     """
-    k = Khisto(s)
-    return numpy.sum([1.*i*k[i] for i in k])/len(s.status)
+    ks = degree_dist(s)
+    return np.sum([1.*i*ks[i] for i in ks])/len(s.status)
     
-    
-    
-def StdK(s):
+     
+def std_degree(s):
     """
-    Return mean degree of network
-    s - network substrate
+    Calculate the degree standard deviation degree of a Substrate
+    Inputs:
+        s: Substrate object
+    Outputs:
+        Return degree standard deviation of Substrate
     """
-    k = Khisto(s)
-    return numpy.sum([1.*i*i*k[i] for i in k])/len(s.status)
+    ks = degree_dist(s)
+    return np.sum([1.*i*i*ks[i] for i in ks])/len(s.status)
     
-
-
-def Pk(s):
+def p_degree(s):
     """
-    Returns the degree distribution of G as a dictionary = {degree k: probability of k}
-    Degree distribution measures probabilities
+    Calculate the degree probability distribution of a Substrate
+    (The degree probability distribution is normalized to 1.)
+    Inputs:
+        s  : Substrate object
+    Outputs:
+        pk : Return a dictionary histogram 
+             {degree:probability of nodes with degree}
     """
     pk = {}
-    ks = Khisto(s) # {degree: number of nodes with degree}
+    ks = degree_dist(s) # {degree: number of nodes with degree}
     for k in ks.keys(): pk[k] = 1.*ks[k]/len(s.status)
     return pk
 
-
-
-def RPk(S, ra = True):
+def residual_p_degree(s, ra = True):
     """
-    Returns the residual degree distribution as a dictionary: 
-    {degree k: number of nodes with residual degree k}
-    if ra = 1, return as an array, else return as a dict
+    Calculate the residual degree distribution of a Substrate.
+    'Residual degree' refers to the number of neighbors that are not
+    Recovered.  That is to say, count all neighbors that are Susceptible
+    or Infected and are still interacting.
+    Inputs:
+        s  : Substrate object
+        ra : If True, returns output as an array
+             If False, returns output as a dictionary
+    Outputs
+        Returns the residual degree distribution.  The format is either
+        as an adjacency matrix (if ra == True) or as a dictionary
+        {degree: number of nodes with residual degree} (if ra == False)
     """
-    L = set(S.Susceptibles()) | set(S.Infecteds()) # Set of all non-recovered nodes (residual nodes)
-    if ssp.issparse(S.A):
-        Rdegree = numpy.array([len( L & set(S.A.getrow(i).indices)) for i in L])
-        # for each residual node, count the number of connecting residual nodes
+    # Calculate set of all non-recovered nodes (residual nodes)
+    L = set(s.susceptibles()) | set(s.infecteds()) 
+    # For each residual node, count the number of connecting residual nodes
+    if ssp.issparse(s.A):
+        rdegree = np.array([len( L & set(s.A.getrow(i).indices)) for i in L])
     else:
-        Rdegree = numpy.array([len(L & set(numpy.where(numpy.array(S.A)[i] > 0)[0])) for i in range(len(S.status))])
-    pk = Counter(Rdegree)
-    nn = 1.*numpy.sum(pk.values())
+        rdegree = np.array([len(L & set(np.where(np.array(s.A)[i] > 0)[0])) 
+                           for i in range(len(s.status))])
+    pk = Counter(rdegree)
+    nn = 1.*np.sum(pk.values())
     if ra:
-        return numpy.array([(k, pk[k]/nn) for k in sorted(pk.keys())]).transpose()
+        return np.array([(k, pk[k]/nn) for k in sorted(pk.keys())]).transpose()
     else:
         return dict([(k, pk[k]/nn) for k in sorted(pk.keys())])
 
+###--------------------------------------------------------------------
+# The following functions are ways to make measurements of the 
+# critical behavior of SIRS dynamics.  
+#
+# We focus on generating SIRS phase diagrams, fixing the underlying 
+# connecting graph and gamma. Fixing gamma fixes the time scale of 
+# the discrete time simulations to be 1/gamma.  For large gamma, the 
+# simulation will progress quickly but will be less accurate.
+#
+# The phase diagrams are 2-dimensional.  The x-axis is 
+# alpha = rho/gamma, the relative rate of waning compared to recovery.
+# The y-axis is R0 = beta*<k>/gamma, where <k> is the mean degree.
+# R0 is the epidemiological parameter enumerating the average number
+# of neighbors infected by an Infected node.
+#
+# There are a variety of order parameters that the phase diagrams can
+# plot on the z-axis that are indicative of the endemic disease state.
+# The following functions produce these different order parameters and
+# allow for straightforward phase diagram generation and visualization.
+###--------------------------------------------------------------------
 
 
-###--------------------------------------------------------------------------------------------------------
-# Methods for measuring critical behavior of the SIRS dynamics
-###--------------------------------------------------------------------------------------------------------
-def SIRS_Compare(G, nobs, gam = .005, R0s = None, rhos = None, mft = True, prev = None, debug = False):
+def sirs_diagram(G, gamma_ = .005, R0s = None, alphas = None, 
+                 nobs = 10, mft = True, prev = None, debug = False):
     """
-    Measure the SIRS phase diagram properties: I*, <m>, <m^2>, number of connected components of residual network
-    Then, extract (one instance of) the residual network and measure SIS I*
-    Input   graph G, will be converted to Substrate class object
-            nobs - number of observations if endemic state is reached
-            gam - single number determines time step of simulation
-            R0s - array of parameters: beta*<k>/gam
-            rhos - array of parameters: rho/gam
-            mft - if true, intelligently set the starting status of the graph
-            prev - if not ==None, should be a list of 4 previously written dictionaries
-    Output  idict = {(rho, R0) : I*}
-            mdict = {(rho, R0) : <m>}
-            m2dict = {(rho, R0) : <m^2>}
-            ccdict = {(rho, R0) : # connected components}
-            sisdict = {(rho, R0) : SIS I*}     
+    This script measures SIRS phase diagram properties for a grid
+    of parameters (alphas, R0s).  For each combination of grid 
+    parameters, we produce a single simulated trajectory and observe
+    the system in the quasistationary state after long times. We pick
+    a fixed number of times at which we observe the system and measure
+    the system at each observation time each time.  The observation 
+    times begin after a brief period to allow the transients to die out
+    and allow the system to enter into a quasistationary state.  
+    Observation times are then spaced out to prevent correlations
+    between subsequent observations. Thus, we can measure the 
+    quasistationary (endemic disease) state in SIRS simulations.
+    
+    Phase diagram properties measured:
+        I*    : the mean number of infected nodes
+        <m>   : the mean residual degree
+        <m^2> : the mean-squared residual degree 
+                (2nd moment of degree distribution)
+        cc    : number of connected components in residual network
+    Inputs:
+        G     : a networkx graph - use this to define a Substrate object
+        gamma_: SIRS model parameter; recovery rate; sets time scale
+        R0s   : array/list of R0=beta<k>/gamma values
+                y-axis of phase diagram grid
+        alphas: array/list of alpha=rho/gamma values
+                often these are logarithmically distributed
+                x-axis of phase diagram grid
+        nobs  : number of observation times, integer
+        mft   : If mft==True, begin with a starting configuration of
+                Infecteds equal to the mean field theory prediction
+                for SIRS, given the parameters (beta, gamma, rho)
+                If mft==False, initially infect 1/2 of all nodes
+        prev  : Defaults to None. If prev!=None, the function expects
+                a list of dictionaries [idict, mdict, m2dict, ccdict]
+                representing previous measurements made.  So, one can
+                produce an output with this script, then append new
+                outputs to the old outputs using prev.
+        debug : If debug==True, prints to screen messages indicating
+                the simulation's progress.
+    Outputs:
+        Output is a list of dictionaries [idict, mdict, m2dict, ccdict]
+        The dictionaries' keys are (rho, R0) pairs, and values are 
+        lists of measurements made at each of the observation times. If
+        the quasistationary state has died out, the outputs of idict 
+        will all be zero.
+        idict : {(rho_, R0) : [S*,I*]}, an array of two vectors
+                 representing the (S, I) state at each observation time 
+        mdict : {(rho_, R0) : <m>}, mean residual degree vs. time
+        m2dict: {(rho_, R0) : <m^2>}, 2nd moment of residual degree            
+                distribution vs. time
+        ccdict: {(rho_, R0) : #cc}, number of connected components of
+                the residual network vs. time
     """
-    if R0s == None: R0s = numpy.array(range(45,65))/50.
-    if rhos == None: rhos = numpy.logspace(-3, 2, 20)
+    # default input parameters for phase diagram
+    if R0s == None: R0s = np.array(range(45,65))/50.
+    if alphas == None: alphas = np.logspace(-3, 2, 20)
+    # define Substrate object using the input graph and initiate status
     S = Substrate(G)
-    S.InitStatus()
-    meank = MeanK(S)
-    if prev == None:
-        idict = {}
-        mdict = {}
-        m2dict = {}
-        ccdict = {}
-        sisdict = {}
-    else: idict, mdict, m2dict, ccdict, sisdict = prev
-    for r in rhos: # r is rho/gam, while simulation uses just rho
-        for R0 in R0s: # R0 is beta<meank>/gam, while simulation uses beta
-            if (r, R0) not in idict:
-                beta = R0*gam/meank
-                rho = r*gam
-                # extract SIRS simulation results
-                a,b,c,d = SimulSIRS(S, G, gam, beta, rho, nobs, mft, debug)
-                idict[r, R0] = a
-                mdict[r, R0] = b
-                m2dict[r, R0] = c
-                ccdict[r, R0] = d
-                # now begin SIS simulation
-                resid_nodes = list(set(S.Susceptibles()) | set(S.Infecteds()))
-                if debug: print 'Residual network size:',  len(resid_nodes)
-                g = nx.subgraph(G, resid_nodes)
-                s = Substrate(g)
-                s.InfectGroup(range(len(S.Infecteds())))
-                sis = SimulSIS(s, g, gam, beta, nobs, debug)
-                sisdict[r, R0] = sis
-    return idict, mdict, m2dict, ccdict, sisdict
-    
-    
-    
-def SIRS_Compare_data(data, total = None):
-    """
-    The SIRS idict and sisidict data sets are in the form {(rho, R0), array([[S*],[I*]])
-    Want to find the fractional average I* over time
-    Input:  idict or sisidict, output from SIRS_Compare()
-            total - if given as a number, this is the total number of nodes in the graph, appropriate for idict
-                    if given as none, just return I/(S + I), appropriate for sisidict
-    Output: d = {(rho, R0), I*/N}
-    """
-    d = {}
-    for key in data:
-        a = data[key]
-        if total == None: 
-            d[key] = 1.*numpy.mean(a[1])/numpy.mean(a[1] + a[0])
-        else:
-            d[key] = 1.*numpy.mean(a[1])/total
-    return d
-    
-
-
-def SIRS_Diagram(G, nobs, gam = .005, R0s = None, rhos = None, mft = True, prev = None, debug = False):
-    """
-    Measure the SIRS phase diagram properties: I*, <m>, <m^2>, number of connected components of residual network
-    The number of connected components is calculated each time step with reference to the original graph
-    Input   graph G, will be converted to Substrate class object
-            nobs - number of observations if endemic state is reached
-            gam - single number determines time step of simulation
-            R0s - array of parameters: beta*<k>/gam
-            rhos - array of parameters: rho/gam
-            mft - if true, intelligently set the starting status of the graph
-            prev - if not ==None, should be a list of 4 previously written dictionaries
-    Output  idict = {(rho, R0) : I*}
-            mdict = {(rho, R0) : <m>}
-            m2dict = {(rho, R0) : <m^2>}
-            ccdict = {(rho, R0) : # connected components}
-    """
-    if R0s == None: R0s = numpy.array(range(45,65))/50.
-    if rhos == None: rhos = numpy.logspace(-3, 2, 20)
-    S = Substrate(G)
-    S.InitStatus()
-    meank = MeanK(S)
+    S.initstatus()
+    # calculate mean node degree
+    meank = mean_degree(S)
     if prev == None:
         idict = {}
         mdict = {}
         m2dict = {}
         ccdict = {}
     else: idict, mdict, m2dict, ccdict = prev
-    for r in rhos: # r is rho/gam, while simulation uses just rho
-        for R0 in R0s: # R0 is beta<meank>/gam, while simulation uses beta
-            if (r, R0) not in idict:
-                beta = R0*gam/meank
-                rho = r*gam
-                a,b,c,d = SimulSIRS(S, G, gam, beta, rho, nobs, mft, debug)
-                idict[r, R0] = a
-                mdict[r, R0] = b
-                m2dict[r, R0] = c
-                ccdict[r, R0] = d
+    for alpha in alphas:
+        for R0 in R0s:
+            if (alpha, R0) not in idict:
+                # Define model parameters beta and rho from R0 and alpha
+                beta_ = R0*gamma_/meank
+                rho_ = alpha*gamma_
+                # Perform the simulation
+                a,b,c,d = simsirs(S, G, gamma_, beta_, rho_, 
+                                    nobs, mft, debug)
+                # Append simulation results to the dictionaries
+                idict[alpha, R0] = a
+                mdict[alpha, R0] = b
+                m2dict[alpha, R0] = c
+                ccdict[alpha, R0] = d
     return idict, mdict, m2dict, ccdict
 
 
 
-def SimulSIRS(S, G, gam, beta, rho, nobs, mft = True, debug = False):
+def simsirs(S, G, gamma_, beta_, rho_, nobs, mft = True, debug = False):
     """
-    Measure the equilibrium endemic state for the given input parameters
+    Generate a single SIRS trajectory given a connectivity network and
+    SIRS model parameters.  Observe the properties of that trajectory
+    at a fixed number of observation times.  The observation 
+    times begin after a brief period to allow the transients to die out
+    and allow the system to enter into a quasistationary state.  
+    Observation times are then spaced out to prevent correlations
+    between subsequent observations. Thus, we can measure the 
+    quasistationary (endemic disease) state in SIRS simulations.
+    Inputs:
+        S     : a Substrate object created from graph G
+        G     : a networkx graph - used to define a Substrate object
+        gamma_: SIRS model parameter; recovery rate; sets time scale
+        beta_ : SIRS model parameter; per neighbor infection rate
+        rho_  : SIRS model parameter; loss of immunity rate
+        nobs  : number of observation times; integer
+        mft   : If mft==True, begin with a starting configuration of
+                Infecteds equal to the mean field theory prediction
+                for SIRS, given the parameters (beta, gamma, rho)
+                If mft==False, initially infect 1/2 of all nodes
+        debug : If debug==True, prints to screen messages indicating
+                the simulation's progress.
+    Outputs:
+        Output is a list of dictionaries [idict, mdict, m2dict, ccdict]
+        The dictionaries' keys are (rho, R0) pairs, and values are 
+        lists of measurements made at each of the observation times.
+        idict : {(rho_, R0) : [S*,I*]}, an array of two vectors
+                 representing the (S, I) state at each observation time
+        mdict : {(rho_, R0) : <m>}, mean residual degree vs. time
+        m2dict: {(rho_, R0) : <m^2>}, 2nd moment of residual degree            
+                distribution vs. time
+        ccdict: {(rho_, R0) : #cc}, number of connected components of
+                the residual network vs. time
     """
+    # Initialize empty lists to store simulation results
     idict = []
     mdict = []
     m2dict = []
     ccdict = []
-    meank = MeanK(S)
-    stdk = StdK(S)
-    nn = len(S.status) # count number of nodes in the network...
+    # Calculate network degree distribution properties
+    meank = mean_degree(S)
+    stdk = std_degree(S)
+    nn = len(S.status)
     # Infect an initial set of nodes in the network
-    S.InitStatus()
+    S.initstatus()
     if mft:
-        S.InfectGroup(range(max(int(nn*(1-gam/beta/meank)),nn/10)))
+        S.infectgroup(range(max(int(nn*(1-gamma_/beta_/meank)),nn/10)))
     else:
-        S.InfectGroup(range(int(nn/2))) # infect the first half of the nodes...    
+        S.infectgroup(range(int(nn/2)))   
     # First we equilibrate
-    if debug: print 'Begin equilibrating SIRS', beta, rho, asctime()
+    if debug: 
+        print 'Begin equilibrating SIRS', beta_, rho_, asctime()
     for i in range(25):
-        S.SIRSupdate(beta, gam, rho, nsteps = int(5./gam))
-        # check to see if the network has entered the endemic state or not...
-        if len(S.Infecteds()) == 0:
-            idict = numpy.array([[nn]*nobs, [0]*nobs])
-            mdict = numpy.array([meank]*nobs)
-            m2dict = numpy.array([stdk]*nobs)
-            ccdict = numpy.array([1]*nobs)
+        S.SIRSupdate(beta_, gamma_, rho_, nsteps = int(5./gamma_))
+        # Check to see that the quasistationary state has not yet died
+        if len(S.infecteds()) == 0:
+            idict = np.array([[nn]*nobs, [0]*nobs])
+            mdict = np.array([meank]*nobs)
+            m2dict = np.array([stdk]*nobs)
+            ccdict = np.array([1]*nobs)
             return idict, mdict, m2dict, ccdict
-    # Now we begin making observations:
-    if debug: print 'Finished equilibrating, begin SIRS measurements', beta, rho, asctime()
+    # Begin making observations of the quasistationary state
+    if debug: 
+        print 'Finished equilibrating, begin SIRS measurements', 
+              beta_, rho_, asctime()
     for i in range(nobs):
-        S.SIRSupdate(beta, gam, rho, nsteps = int(5./gam))
-        nI = len(S.Infecteds())
-        nS = len(S.Susceptibles())
+        S.SIRSupdate(beta_, gamma_, rho_, nsteps = int(5./gamma_))
+        nI = len(S.infecteds())
+        nS = len(S.susceptibles())
+        # Check to see that the quasistationary state has not yet died
         if nI == 0:
-            idict = numpy.array([[nn]*nobs, [0]*nobs])
-            mdict = numpy.array([meank]*nobs)
-            m2dict = numpy.array([stdk]*nobs)
-            ccdict = numpy.array([1]*nobs)
+            idict = np.array([[nn]*nobs, [0]*nobs])
+            mdict = np.array([meank]*nobs)
+            m2dict = np.array([stdk]*nobs)
+            ccdict = np.array([1]*nobs)
             return idict, mdict, m2dict, ccdict
         rpk = RPk(S, True)
-        idict.append(numpy.array([nS, nI]))
-        mdict.append(numpy.dot(rpk[0], rpk[1]))
-        m2dict.append(numpy.dot(rpk[0]**2, rpk[1]))
-        ccdict.append(ConnectedComponents(G, S))
-    return numpy.array(idict).transpose(), numpy.array(mdict), numpy.array(m2dict), numpy.array(ccdict)
+        idict.append(np.array([nS, nI]))
+        mdict.append(np.dot(rpk[0], rpk[1]))
+        m2dict.append(np.dot(rpk[0]**2, rpk[1]))
+        ccdict.append(connectedcomponents(G, S))
+    return np.array(idict).transpose(), np.array(mdict), 
+           np.array(m2dict), np.array(ccdict)
 
-
-
-def SimulSIS(S, G, gam, beta, nobs, debug = False):
+def connectedcomponents(G, S):
     """
-    Measure the equilibrium endemic state for the given input parameters
-    For now, the substrate passed to the simulation is already infected...
+    Find the number of connected components of the residual graph of G.
+    The residual graph is found by identifying all Susceptible and 
+    Infected nodes and constructing the subgraph of G. It is then
+    straightforward to count the number of connected components.
+    Inputs:
+        G : connectivity graph; networkx undirected Graph
+        S : Substrate object created from G; contains
+            status vector for identifying residual graph
+    Outputs:
+        Number of residual graph connected components; integer
     """
-    idict = []
-    meank = MeanK(S)
-    stdk = StdK(S)
-    nn = len(S.status) # count number of nodes in the network...  
-    # First we equilibrate
-    if debug: print 'Begin equilibrating SIS', beta, asctime()
-    for i in range(25):
-        S.SISupdate(beta, gam, nsteps = int(5./gam))
-        # check to see if the network has entered the endemic state or not...
-        if len(S.Infecteds()) == 0:
-            idict = numpy.array([[nn]*nobs, [0]*nobs])
-            return idict
-    # Now we begin making observations:
-    if debug: print 'Finished equilibrating, begin SIS measurements', beta, asctime()
-    for i in range(nobs):
-        S.SISupdate(beta, gam, nsteps = int(5./gam))
-        nI = len(S.Infecteds())
-        nS = len(S.Susceptibles())
-        if nI == 0:
-            idict = numpy.array([[nn]*nobs, [0]*nobs])
-            return idict
-        idict.append(numpy.array([nS, nI]))
-    return numpy.array(idict).transpose()
-
-
-
-def ConnectedComponents(G, S):
-    """
-    Find the number of connected components of the residual graph of G
-    Residual nodes are found by pulling out all non-recovered nodes 
-        and creating a subgraph of G using the list of nodes
-    """
-    resids = numpy.hstack([S.Infecteds(), S.Susceptibles()])
+    resids = np.hstack([S.infecteds(), S.susceptibles()])
     g = G.subgraph(resids)
     return len(nx.connected_component_subgraphs(g))
-
-
-
-def CP(t, N, k, betas = None, rhos = None, seed = 0):
-    #betas = numpy.array(sorted(list(set(numpy.arange(.98,1.1,.01))|set(numpy.arange(1.001,1.005,.001))|set(numpy.arange(1.15,1.5,.05))|set(numpy.arange(1.25,2.25,.25))|set([1.025, 1.015]))))
-    #betas = numpy.array(sorted(list(set(numpy.arange(.98,1.1,.01))|set(numpy.arange(1.001,1.005,.001))|set(numpy.arange(1.15,1.5,.05)))))
-    #betas = numpy.array(range(5,130,5))/100.
-    gam = .005
-    if betas == None: betas = numpy.array(range(45,65))/50.
-    if rhos == None: rhos = numpy.logspace(-3, 2, 20)
-    for i in range(len(rhos)):
-        rho = rhos[i]
-        exec('f = open("%s_sirs_5k_%d_%d_a_cp.dat", "w")'%(t,k,i))
-        data = MeasureCP_SIRS(t, N, k, 10, 100, betas, gam, rho, True, seed, True) # setting resid to be true for now, returning residual degree distributions
-        pickle.dump(data[0], f)
-        f.close()
-
-
-def MeasureCP_SIRS(t = 'WS', N = 5000, k = 10, nrun = 1, nobs = 100, betas = None, gam = .005, rho = 1, resid = False, seed = None, debug = False):
-    """
-    Perform several simulations on random graphs of a specified type
-    Each simulation in the loop starts with the same initial set of infected individuals,
-        using a different seed to generate the graph.  
-        If a seed is specified, the simulation will only run for that seed.
-    If a seed is specified, 
-    Return a list of dictionaries containing data: [{control parameter = beta*<k>/gam : [data from SimulSIS]}]
-    Inputs:
-        t - a string that specifies the type of graph: WS, BA, Gnp, delta...
-        N - size of the graph (number of nodes)
-        k - mean degree
-        nrun - number of different graphs to generate...
-        nobs - number of observations for each set of parameter values
-        betas - numpy array of control parameter values beta*<k>/gam - (pass beta to simulation)
-        gam - parameter of SIS simulation, defaults to .005
-        rho - parameter of SIS simulation rho/gam - (pass rho to simulation)
-        resid - if True, return list of residual degree networks from the endemic state
-        seed - integer seed of the random graph.  if specified, run for only a single graph with that random seed
-        debug - if True, print debugging messages
-    Outputs:
-        data - list of outputs from CP_SIS: [{control parameter = beta*<k>/gam : [data from SimulSIS]}]
-    """
-    data = []
-    if nrun == 1 and seed != None: # if we are passing a seed to the program from outside
-        print 'Begin constructing graph', seed, asctime()
-        if t == 'WS':
-            print 'Watts-Strogatz graph'
-            G = nx.connected_watts_strogatz_graph(N, k, 1, seed = seed)
-        elif t == 'delta':
-            print 'Random regular graph'
-            G = nx.random_regular_graph(k, N, seed = seed)
-        elif t == 'BA':
-            print 'Barabas-Albert scale-free graph'
-            G = nx.barabasi_albert_graph(N, k/2, seed = seed)
-        else:
-            print 'Poisson exponential graph'
-            G = PoissonGraph(N, 1.*k/N, seed = seed)
-        print 'Done constructing graph'
-        print 'Begin constructing substrate object', seed, asctime()
-        S = Substrate(G) # construct substrate
-        del G # clear memory
-        S.InitStatus() # allow CP_SIS to infect the graph...
-        print 'Begin Critical Point measurement simulation', seed, asctime()
-        d = CP_SIRS(S, gam, rho, nobs, betas, True, False, resid, debug)
-        print 'Ending simulation on graph', seed, asctime()
-        data.append(d)
-    else:  # generate random seeds inside the program
-        for i in range(nrun):
-            print 'Begin constructing graph', i, asctime()
-            if t == 'WS':
-                print 'Watts-Strogatz graph'
-                G = nx.connected_watts_strogatz_graph(N, k, 1, seed = i)
-            elif t == 'delta':
-                print 'Random regular graph'
-                G = nx.random_regular_graph(k, N, seed = i)
-            elif t == 'BA':
-                print 'Barabas-Albert scale-free graph'
-                G = nx.barabasi_albert_graph(N, k/2, seed = i)
-            else:
-                print 'Poisson exponential graph'
-                G = PoissonGraph(N, 1.*k/N, seed = i)
-            print 'Done constructing graph'
-            print 'Begin constructing substrate object', i, asctime()
-            S = Substrate(G) # construct substrate
-            del G # clear memory
-            S.InitStatus() # allow CP_SIS to infect the graph...
-            print 'Begin Critical Point measurement simulation', i, asctime()
-            d = CP_SIRS(S, gam, rho, nobs, betas, True, False, resid, debug)
-            print 'Ending simulation on graph', i, asctime()
-            data.append(d)
-    return data
-
-
-
-def CP_SIRS(S, gam, rho, nobs, betas = None, mft = True, res = False, resid = False, debug = False):
-    """
-    Perform a measurement of the critical point for SIS dynamics
-    Return a dictionary: {control parameter = beta*<k>/gam : [data from SimulSIS]}
-    Inputs:
-        S - Substrate type object, already infected
-        gam - parameter of simulation 
-        rho - parameter of simulation rho/gam- pass rho to simulation
-        nobs - number of times to observe the endemic state
-        betas - numpy array of control parameter values beta*<k>/gam - pass beta to simulation
-        mft - if True, start the simulation with the MFT prediction of endemic infection
-            - if False, infect 1/2 of the nodes...
-        res - if True, start each simulation (new beta) at the same starting configuration
-        debug - if True, print debugging messages
-    Outputs:
-        data - {control parameter = beta*<k>/gam : [data from SimulSIS]}
-    """
-    if betas == None: betas = numpy.array(sorted(list(set(range(96, 126, 1))|set(range(130, 200, 10)))))/100.
-    N = len(S.status)
-    meank = MeanK(S)
-    data = {} # dictionary {beta*<k>/gam : [data from SimulSIS]}
-    for beta in betas: # for each given beta, perform the simulation
-        if len(S.Infecteds()) == 0: # check to see if network is not already infected
-            if mft:
-                S.InfectGroup(range(max(int(N*(1-1./beta)),100)))
-            else:
-                S.InfectGroup(range(int(N/2))) # infect the first half of the nodes...    
-        if debug: print 'Beta =', beta, asctime()
-        if debug: print '%d Infecteds' %len(S.Infecteds())
-        d = SimulSIRS(S, beta/meank*gam, gam, rho*gam, nobs, res, resid, debug)
-        data[beta] = d
-        if mft: #create a new starting configuration (on the next loop)
-            S.InitStatus()
-    return data
-
-
-
-
-###--------------------------------------------------------------------------------------------------------
-#  Same as above, but for deterministic dynamics
-###--------------------------------------------------------------------------------------------------------
-def Determ_SIRS_Diagram(G, nobs, rs = None, t1 = None, t2s = None, prev = None, debug = False):
-    """
-    Measure the SIRS phase diagram properties: I*, <m>, <m^2>, number of connected components of residual network
-    The number of connected components is calculated each time step with reference to the original graph
-    Input   graph G, will be converted to Substrate class object
-            nobs - number of observations if endemic state is reached
-            rs - list of r parameters to be used in the simulation
-            t1 - single number
-            t2s - list of t2 parameters to be used in the simulation
-            prev - if not ==None, should be a list of 4 previously written dictionaries
-            debug - returns messages if True
-    Output  idict = {(rho, R0) : I*}
-            mdict = {(rho, R0) : <m>}
-            m2dict = {(rho, R0) : <m^2>}
-            ccdict = {(rho, R0) : # connected components}
-    """
-    if rs == None: rs = numpy.linspace(.01, .25, 25)
-    if t1 == None: t1 = 10
-    if t2s == None: t2s = numpy.array(numpy.linspace(0,120, 25), dtype = int)
-    S = Substrate(G)
-    S.InitStatus()
-    meank = MeanK(S)
-    if prev == None:
-        idict = {}
-        mdict = {}
-        m2dict = {}
-        ccdict = {}
-    else: idict, mdict, m2dict, ccdict = prev
-    for r in rs: # r is probability of transmission
-        for t2 in t2s: # t2 is the time spent not infected
-            if (t2, r) not in idict:
-                a,b,c,d = Determ_SimulSIRS(S, G, r, t1, t2, nobs, debug)
-                idict[t2, r] = a
-                mdict[t2, r] = b
-                m2dict[t2, r] = c
-                ccdict[t2, r] = d
-    return idict, mdict, m2dict, ccdict
     
-
-
-
-def Determ_SimulSIRS(S, G, r, t1, t2, nobs, debug = False):
-    """
-    Measure the equilibrium endemic state for the given input parameters
-    """
-    idict = []
-    mdict = []
-    m2dict = []
-    ccdict = []
-    meank = MeanK(S)
-    stdk = StdK(S)
-    nn = len(S.status) # count number of nodes in the network...
-    # Infect an initial set of nodes in the network
-    S.InitStatus()
-    S.InfectGroup(range(40))
-    #S.InfectGroup(range(int(nn/2))) # infect the first half of the nodes...
-    S.PrepareDeterm(t1, t2)
-    # First we equilibrate
-    if debug: print 'Begin equilibrating SIRS', r, t1, t2, asctime()
-    for i in range(25):
-        S.SIRSdeterm(r, t1, t2, nsteps = 5*(t1+t2))
-        # check to see if the network has entered the endemic state or not...
-        if len(S.DetermI(t1, t2)) == 0:
-            idict = numpy.array([[nn]*nobs, [0]*nobs])
-            mdict = numpy.array([meank]*nobs)
-            m2dict = numpy.array([stdk]*nobs)
-            ccdict = numpy.array([1]*nobs)
-            return idict, mdict, m2dict, ccdict
-    # Now we begin making observations:
-    if debug: print 'Finished equilibrating, begin SIRS measurements', r, t1, t2, asctime()
-    for i in range(nobs):
-        S.SIRSdeterm(r, t1, t2, nsteps = 5*(t1+t2))
-        nI = len(S.DetermI(t1, t2))
-        nS = len(S.DetermS(t1, t2))
-        if nI == 0:
-            idict = numpy.array([[nn]*nobs, [0]*nobs])
-            mdict = numpy.array([meank]*nobs)
-            m2dict = numpy.array([stdk]*nobs)
-            ccdict = numpy.array([1]*nobs)
-            return idict, mdict, m2dict, ccdict
-        rpk = RPk(S, True)
-        idict.append(numpy.array([nS, nI]))
-        mdict.append(numpy.dot(rpk[0], rpk[1]))
-        m2dict.append(numpy.dot(rpk[0]**2, rpk[1]))
-        ccdict.append(ConnectedComponents(G, S))
-    return numpy.array(idict).transpose(), numpy.array(mdict), numpy.array(m2dict), numpy.array(ccdict)
-    
-    
-    
-def Determ_Rstar(N = 10, nobs = 10, t1 = 10, rs = None, t2s = None, debug = False):
-    """
-    Run the deterministic dynamics many times to carefully measure the critical point
-    N = number of times for each graph
-    nobs = number of observations within each run of the simulation
-    t1 = tau1, the duration of infection
-    rs = list of rs (want between 0 and .1)
-    t2s = list of tau2 values, the duration of recovery
-    """
-    if rs == None: rs = numpy.linspace(.1/50, .1, 50)
-    if t2s == None: t2s = range(0,40)
-    idict = defaultdict(list)
-    mdict = defaultdict(list)
-    m2dict = defaultdict(list)
-    ccdict = defaultdict(list)
-    for r in rs: # r is probability of transmission
-        for t2 in t2s: # t2 is the time spent not infected
-            if debug: print 't1 = ', t1, 't2 = ', t2, 'r = ', r, asctime()
-            for i in range(N): # i is the seed for the random graph
-                G = PoissonGraph(14400, 4./14400, seed = i) # Edit this for a different type of random graph
-                S = Substrate(G)
-                S.InitStatus()
-                S.InfectGroup(range(40))
-                a,b,c,d = Determ_SimulSIRS(S, G, r, t1, t2, nobs, debug)
-                idict[t2, r].append(a)
-                mdict[t2, r].append(b)
-                m2dict[t2, r].append(c)
-                ccdict[t2, r].append(d)
-    return idict, mdict, m2dict, ccdict
-    # Notes: how to analyze the output from this?
-    
-    
-    
-    
-def Determ_TimeSeries(S, r, t1, t2, nobs = 100, initn = 40, debug = False):
-    """
-    S - Substrate object
-    r, t1, t2 - parameters of deterministic simulation
-    nobs - number of observations to make
-    initn - number of initial infecteds
-    debug - if True, return debugging messages
-    """
-    S.InitStatus()
-    S.InfectN(initn)
-    S.PrepareDeterm(t1, t2)
-    data = numpy.array([S.SIRSdeterm(r, t1, t2, update = True, ret = True) for i in range(nobs)])
-    return data
-
-
-
-def TimeSeries(data, t1, t2):
-    """
-    Input an array of node status vectors vs. time
-    Return three vectors (S[t], I[t], R[t])
-    """
-    timeseries = numpy.array([[len(numpy.where(data[i] == 0)[0]), #S[t]
-        len(numpy.where(data[i] >= t2)[0]), #I[t]
-        len(set(numpy.where(data[i] >0)[0]) & set(numpy.where(data[i] <= t2)[0])) #R[t]
-        ] for i in range(len(data))])
-    return timeseries.transpose()
-
-
-
-###--------------------------------------------------------------------------------------------------------
-# Methods for measuring critical behavior of the SIS dynamics
-###--------------------------------------------------------------------------------------------------------
-def MeasureCP_SIS(t = 'WS', N = 50000, k = 6, nrun = 10, nobs = 100, betas = None, gam = .005, debug = False):
-    """
-    Perform several simulations on random graphs of a specified type
-    Return a list of dictionaries containing data: [{control parameter = beta*<k>/gam : [data from SimulSIS]}]
-    Inputs:
-        t - a string that specifies the type of graph: WS, BA, Gnp, delta...
-        N - size of the graph (number of nodes)
-        k - mean degree
-        nrun - number of different graphs to generate...
-        nobs - number of observations for each set of parameter values
-        betas - numpy array of control parameter values beta*<k>/gam - pass beta to simulation
-        gam - parameter of SIS simulation, defaults to .005
-        debug - if True, print debugging messages
-    Outputs:
-        data - list of outputs from CP_SIS: [{control parameter = beta*<k>/gam : [data from SimulSIS]}]
-    """
-    data = []
-    for i in range(nrun):
-        print 'Begin constructing graph', i, asctime()
-        if t == 'WS':
-            print 'Watts-Strogatz graph'
-            G = nx.connected_watts_strogatz_graph(N, k, 1, seed = i)
-        elif t == 'delta':
-            print 'Random regular graph'
-            G = nx.random_regular_graph(k, N, seed = i)
-        elif t == 'BA':
-            print 'Barabas-Albert scale-free graph'
-            G = nx.barabasi_albert_graph(N, k/2, seed = i)
-        else:
-            print 'Poisson exponential graph'
-            G = PoissonGraph(N, 1.*k/N, seed = i)
-        print 'Done constructing graph'
-        print 'Begin constructing substrate object', i, asctime()
-        S = Substrate(G) # construct substrate
-        del G # clear memory
-        S.InitStatus() # allow CP_SIS to infect the graph...
-        print 'Begin Critical Point measurement simulation', i, asctime()
-        d = CP_SIS(S, gam, nobs, betas, True, False, debug)
-        print 'Ending simulation on graph', i, asctime()
-        data.append(d)
-    return data
-    
-
-
-def CP_SIS(S, gam, nobs, betas = None, mft = True, res = False, debug = False):
-    """
-    Perform a measurement of the critical point for SIS dynamics
-    Return a dictionary: {control parameter = beta*<k>/gam : [data from SimulSIS]}
-    Inputs:
-        S - Substrate type object, already infected
-        gam - parameter of SIS simulation
-        betas - numpy array of control parameter values beta*<k>/gam - pass beta to simulation
-        mft - if True, start the simulation with the MFT prediction of endemic infection
-            - if False, infect 1/2 of the nodes...
-        res - if True, start each simulation (new beta) at the same starting configuration
-        debug - if True, print debugging messages
-    Outputs:
-        data - {control parameter = beta*<k>/gam : [data from SimulSIS]}
-    """
-    if betas == None: betas = numpy.array(sorted(list(set(range(96, 126, 1))|set(range(130, 200, 10)))))/100.
-    N = len(S.status)
-    meank = MeanK(S)
-    data = {} # dictionary {beta*<k>/gam : [data from SimulSIS]}
-    for beta in betas: # for each given beta, perform the simulation
-        if len(S.Infecteds()) == 0: # check to see if network is not already infected
-            if mft:
-                S.InfectGroup(range(int(N*(1-1./beta))))
-            else:
-                S.InfectGroup(range(int(N/2))) # infect the first half of the nodes...    
-        if debug: print 'Beta =', beta, asctime()
-        d = SimulSIS(S, beta/meank*gam, gam, nobs, res, debug)
-        data[beta] = d
-        if mft: #create a new starting configuration (on the next loop)
-            S.InitStatus()
-    return data
-    
-    
-    
-###--------------------------------------------------------------------------------------------------------
+###----------------------------------------------------------------------------
 ### Measuring the simulation results
-###--------------------------------------------------------------------------------------------------------
+###----------------------------------------------------------------------------
 
-def MeasureIstar(s):
-    """ 
-    Input the data from a Critical Point measurement
-    Return an array: {[betas, mean(I*), std(I*)]} """
-    betas = numpy.array(sorted(s.keys()))
-    if len(s[betas[0]]) == 1:
-        m = numpy.array([(beta, numpy.mean(s[beta]), numpy.std(s[beta])) for beta in betas])
-    if len(s[betas[0]]) == 2:
-        m = numpy.array([(beta, numpy.mean(s[beta][1]), numpy.std(s[beta][1])) for beta in betas])
-    return m.transpose()
-    # k = numpy.mean(nx.degree(G).values())
-    # n = len(G)
-    # plt.errorbar(m[0]*k/gam, m[1]/n, m[2]/n)
-    
-    
-    
-def ExtractParameters(idata):
+def data_params(idata):
     """
-    Input a dictionary, output from DiagramMeasure() or from GDy.SIRS_Diagram simulation
-    Dictionary should have the form {(rho, R0) : data }
-    Output arrays of values of rho and R0 used in the calculation or simulation
+    Given the output from sirs_diagram(), return two lists of all 
+    parameters alphas and R0s.  The input is a single one of the 
+    outputs (such as idata or mdata) with the form {(alpha, R0):data}
+    Inputs:
+        idata : dictionary from output of sirs_diagram
+    Outputs:
+        alphas: array vector of alpha=rho/gamma
+        R0S   : array vector of R0<k>/gamma
     """
-    rhos = numpy.array(sorted(list(set(numpy.array(idata.keys()).transpose()[0]))))
-    R0s = numpy.array(sorted(list(set(numpy.array(idata.keys()).transpose()[1]))))
-    return rhos, R0s
-    
-    
-    
-def Average(idata, index = None):
+    alphas = np.array(sorted(list(set(np.array(idata.keys()).transpose()[0]))))
+    R0s = np.array(sorted(list(set(np.array(idata.keys()).transpose()[1]))))
+    return alphas, R0s
+
+def avg_idata(idata, index = None):
     """
-    Input idata or mdata from DiagramMeasure
-    Output a similar dictionary, except with the mean value of idata (not a list)
-    
-    Index - sometimes the idata will be in the form of a vector: np.array([#Susceptibles, #Infecteds])
-        In this case, set index to 1 to extract the number of infecteds...
+    Given the output from sirs_diagram(), perform time averaging on
+    the vector of observed values.
+    Inputs:
+        idata : Dictionary from output of sirs_diagram
+        index : Defaults to 0 for mdata, m2data, ccdata. 
+                If idata is the dictionary of (S, I) value pairs,
+                set index=0 for the number of Susceptibles, 
+                set index=1 for the number of Infecteds.
+    Outputs:
+        new   : A dictionary of all averaged values, given the original 
+                time series of observations {(alpha, R0):averaged value}
     """
     new = {}
-    if index !=None: #set index = 1 for data on number of infecteds
+    if index != None:
         for key in idata:
-            new[key] = numpy.mean(idata[key][index])
+            new[key] = np.mean(idata[key][index])
     else:
         for key in idata:
-            new[key] = numpy.mean(idata[key])
+            new[key] = np.mean(idata[key])
     return new
     
-    
-def Fluct(idata, index = None):
+def fluct(idata, index = None):
     """
-    Input idata or mdata from DiagramMeasure
-    Output a similar dictionary, except with the size of the fluctuation in the mean (not a list)
-    
-    Index - sometimes the idata will be in the form of a vector: np.array([#Susceptibles, #Infecteds])
-        In this case, set index to 1 to extract the number of infecteds...
+    Given the output from sirs_diagram(), measure the time-averaged 
+    fluctuation about the mean.  The fluctuation is defined as the
+    interval that contains 90% of the data
+    Inputs:
+        idata : Dictionary from output of sirs_diagram
+        index : Defaults to 0 for mdata, m2data, ccdata. 
+                If idata is the dictionary of (S, I) value pairs,
+                set index=0 for the number of Susceptibles, 
+                set index=1 for the number of Infecteds.
+    Outputs:
+        new   : A dictionary of all fluctuation sizes, given the original 
+                time series of observations {(alpha, R0):averaged value}
     """
     new = {}
-    if index !=None: #set index = 1 for data on number of infecteds
+    if index != None:
         for key in idata:
             h = sorted(list(idata[key][index]))
-            # when choosing the 5% and 95% intervals, err on the side of making the interval bigger, not smaller
-            new[key] = (h[int(.95*len(h)) - 1] - h[int(.05*len(h)) - 1])/2.
-            #new[key] = numpy.std(idata[key][index])
+            new[key] = (h[int(.95*len(h))-1]-h[int(.05*len(h))-1])/2.
     else:
         for key in idata:
-            #new[key] = numpy.std(idata[key])'
             h = sorted(list(idata[key]))
-            new[key] = (h[int(.95*len(h)) - 1] - h[int(.05*len(h)) - 1])/2.
+            new[key] = (h[int(.95*len(h))-1]-h[int(.05*len(h))-1])/2.
     return new
     
-    
-def FracFluct(idata, index = None):
+def frac_fluct(idata, index = None):
     """
-    Input idata or mdata from DiagramMeasure
-    Output a similar dictionary, except with the fractional size of the fluctuation in the mean
-    (this is not a list)
-    i.e.: std(Idata)/mean(Idata), which gives how far the fluctuation differs from the mean
-        empirically speaking, std(Idata) is about 1/2 of the actual size of the fluctuations, 
-        the std does not account for extreme values, and it is the extreme values that allow for extinction
-    
-    Index - sometimes the idata will be in the form of a vector: np.array([#Susceptibles, #Infecteds])
-        In this case, set index to 1 to extract the number of infecteds...
+    Given the output from sirs_diagram(), measure the fractional size
+    of the time-averaged fluctuation about the mean fluct/mean.
+    Inputs:
+        idata : Dictionary from output of sirs_diagram
+        index : Defaults to 0 for mdata, m2data, ccdata. 
+                If idata is the dictionary of (S, I) value pairs,
+                set index=0 for the number of Susceptibles, 
+                set index=1 for the number of Infecteds.
+    Outputs:
+        new   : A dictionary of all fractional fluctuation sizes, 
+                given the original time series of observations 
+                {(alpha, R0):averaged value}
     """
     new = {}
-    Means = Average(idata, index = index)
-    Flucts = Fluct(idata, index = index)
-    for key in Means:
-        new[key] = Flucts[key]/(max(1., Means[key]))
+    means = avg_idata(idata, index = index)
+    flucts = fluct(idata, index = index)
+    for key in means:
+        new[key] = flucts[key]/(max(1., means[key]))
     return new
     
-    
-    
-def PlotIstar(s, avg = False):
+def colormap(data, alphas, R0s,
+             p = True, logx = True, ret = False):
     """
-    Input the data output from MeasureCP_SIRS: a list of dicts: [{control parameter = beta*<k>/gam : [data from SimulSIS]}]
-    Return list of arrays: [MeasureIstar(s)]
-    if avg is True, return a single array of all data sets in s averaged together
+    Use pcolormesh from matplotlib to create a visualization of the 
+    phase diagram in the form of a heat map.
+    Input:  
+        data  : Dictionary of the form {(alpha, R0}:value}, where
+                the value represents <I*>, <S*>, etc.  This dictionary
+                is produced by avg_idata(), fluct(), or frac_fluct()
+        alphas: Phase diagram parameters on x-axis; rho/gamma
+        R0s   : Phase diagram parameters on y-axis; beta<k>/gamma
+                These can be obtained with data_params()
+        p     : Create a plot of the data if p==True
+        logx  : Plot with a logarithmic x-axis (alphas logarithmic)
+        ret   : If ret==True, return the values used to create the
+                heat map, so that they may be manipulated in the 
+                interpreter or elsewhere; defaults to False
+    Output:
+        Creates a matplotlib heatmap if p==True
+        (X, Y, C): These are three arrays that pcolormesh() takes as
+                arguments.  These are returned only if ret==True
     """
-    d = []
-    for i in s: d.append(MeasureIstar(i))
-    if avg: d = sum(numpy.array(d),0)/len(d) # make an array of arrays, sum along the array-stacking axis, and average
-    return d
-    
-    
-    
-def ColorMap(idata, rhos, R0s, plot = True, Log = True, Ret = False):
-    """
-    Use pcolormesh to create a heat plot of idata or mdata
-    Input:  idata (or mdata) - Output from DiagramMeasure, data to be visualized
-            rhos, R0s - numerical values of parameters
-            plot - Set to True if we want to visualize
-            Log - set to true to put x (rho) axis on a log scale
-                This is appropriate, as rho is not zero, and can span large range
-            Ret - if true, return the inputs to pcolormesh...
-    Output: Plot a picture if plot is set to True
-            Output X, Y, C - pcolormesh inputs if Ret input is true
-    """
-    X, Y = numpy.meshgrid(rhos, R0s)
-    C = numpy.array([[idata[rho, R0] for rho in rhos] for R0 in R0s])
+    X, Y = np.meshgrid(alphas, R0s)
+    C = np.array([[idata[rho_, R0] for rho_ in alphas] for R0 in R0s])
     if plot:
         plt.figure()
         pcolormesh(X, Y, C)
-        plt.xlabel('rho/gam')
+        plt.xlabel('rho/gamma')
         if Log: 
-            plt.xlabel('rho/gam')
             plt.semilogx()
         plt.ylabel('R_0')
         plt.colorbar()
         plt.show()
-        # use plt.clim(vmin=, vmax=) to adjust the colorbar scale...)
-    if Ret: return X, Y, C
+    if ret: return X, Y, C
     
+###----------------------------------------------------------------------------
+# Methods for generating different types of graphs
+# The graphs can then be turned into Substrate objects.
+###----------------------------------------------------------------------------
 
-
-def ColorMapM(mdata, m2data, rhos, R0s, meank, plot = True, Log = True, Ret = False):
+def poisson_graph(n = 1000, p = .005, seed = None):
     """
-    Use pcolormesh to create a heat plot of mdata/m2data (ie, <m>/<m^2>
-    Input:  mdata, m2data - Output from DiagramMeasure, data to be visualized
-            rhos, R0s - numerical values of parameters
-            plot - Set to True if we want to visualize
-            Log - set to true to put x (rho) axis on a log scale
-                This is appropriate, as rho is not zero, and can span large range
-            Ret - if true, return the inputs to pcolormesh...
-    Output: Plot a picture if plot is set to True
-            Output X, Y, C - pcolormesh inputs if Ret input is true
+    This function uses networkx's function to generate a Gnp-type
+    graph with a Poisson-distributed degree probability distribution.
+    Occasionally, however, the Gnp-type graph will have multiple 
+    disconnected components: this function connects those components 
+    together with edges so that the output is a single connected component.
+    Inputs:
+        n : number of nodes
+        p : edge probability
+        seed : seed for random graph generation
+    Outputs:
+        g : Connected Gnp-type graph, networkx undirected graph object
     """
-    X, Y = numpy.meshgrid(rhos, R0s)
-    C = numpy.array([[meank*mdata[rho, R0]/m2data[rho, R0] for rho in rhos] for R0 in R0s])
-    if plot:
-        plt.figure()
-        pcolormesh(X, Y, C)
-        plt.xlabel('rho/gam')
-        if Log: 
-            plt.xlabel('Log10(rho/gam)')
-            plt.semilogx()
-        plt.ylabel('R_0')
-        plt.colorbar()
-        plt.show()
-        # use plt.clim(vmin=, vmax=) to adjust the colorbar scale...)
-    if Ret: return X, Y, C
-    
-    
-###--------------------------------------------------------------------------------------------------------
-### Graph generation
-###--------------------------------------------------------------------------------------------------------
-def PoissonGraph(N = 1000, p = .005, seed = None):
-    """
-    Create a Gnp graph, and connect all nodes to the main component
-    Initialize the statuses of all nodes, return the graph ready for simulation
-    """
-    G = nx.fast_gnp_random_graph(N, p, seed)
-    Gs = nx.connected_component_subgraphs(G)
-    for g in Gs[1:]: # connect all disconnected components...
-        node1 = random.choice(Gs[0].nodes())
+    g = nx.fast_gnp_random_graph(n, p, seed)
+    gs = nx.connected_component_subgraphs(G)
+    for subg in gs[1:]: # connect all disconnected components...
+        node1 = random.choice(gs[0].nodes())
         node2 = random.choice(g.nodes())
-        G.add_edge(node1, node2)
-    return G
+        g.add_edge(node1, node2)
+    return g
     
-    
-def PlaneGraph(l = 100):
+def plane_graph(L = 100):
     """
-    Create a grid graph, with only adjacent neighbors connected
-    lxl nodes
-    """
-    G = nx.Graph()
-    for a in range(l*l):
-        b = (a+l)%(l*l)
-        G.add_edge(a,b)
-        G.add_edge(a, (a+1)%l + l*int(a/l))
-    return G
-    
-
-def PlaneGraphnn(l = 100):
-    """
-    Create a grid graph
-    adjacent and nearest diagonal neighbors connected
-    """
-    G = nx.Graph()
-    for a in range(l*l):
-        b = (a+l)%(l*l)
-        G.add_edge(a,b)
-        G.add_edge(a, (a+1)%l + l*int(a/l))
-        G.add_edge(a, (b+1)%l + l*int(b/l))
-        G.add_edge(a, (b-1)%l + l*int(b/l))
-    return G
-
-###--------------------------------------------------------------------------------------------------------
-### Code Graveyard
-###--------------------------------------------------------------------------------------------------------
-def SimulSIS_OLD(S, beta, gam, nobs, res = True, debug = False):
-    """
-    Measure the equilibrium endemic state
+    This function defines an LxL grid of nodes and connects all
+    nodes to their nearest neighbors (square lattice).  This
+    square lattice of nodes has periodic boundary conditions (torus)
     Inputs:
-        S - Substrate type object, already infected
-        beta, gam - parameters of SIS simulation
-        nobs - number of observations of the equilibrium state
-        res - if True, reset the state of the Substrate S to the original state (before simulation)
-        debug - if True, print debugging messages
-    Output:
-        data - array of I* during the equilibrium endemic state
+        L : number of nodes on each edge of the grid
+    Outputs:
+        g : grid graph, networkx undirected graph object
     """
-    data = [] # equilibrium data
-    startstate = S.GetStatus()
-    # First we equilibrate
-    if debug: print 'Begin equilibrating', beta, asctime()
-    for i in range(25):
-        S.SISupdate(beta, gam, nsteps = int(5./gam))
-        #print i, len(S.Infecteds())
-        if len(S.Infecteds()) == 0:
-            data = [0]*nobs
-            if res: S.SetStatus(startstate)
-            return numpy.array(data)
-    # Now we begin making observations:
-    if debug: print 'Finished equilibrating, begin measurements', beta, asctime()
-    for i in range(nobs):
-        S.SISupdate(beta, gam, nsteps = int(5./gam))
-        nI = len(S.Infecteds())
-        if nI == 0:
-            data = [0]*nobs
-            if res: S.SetStatus(startstate)
-            return numpy.array(data)
-        data.append(nI)
-    if res: S.SetStatus(startstate) # restore to starting state if res is True
-    if debug: print 'Simulation finished', beta, asctime()
-    return numpy.array(data)
+    g = nx.Graph()
+    for a in range(L*L):
+        b = (a+L)%(L*L)
+        g.add_edge(a,b)
+        g.add_edge(a, (a+1)%L + L*int(a/L))
+    return g
     
 
-def SimulSIRS_old(S, beta, gam, rho, nobs, res = True, resid = False, debug = False):
+def plane_graph_nn(L = 100):
     """
-    Measure the equilibrium endemic state
+    This function defines an LxL grid of nodes and connects all
+    nodes to their nearest neighbors as well as their next-nearest
+    neighbors.  Each node is therefore locally connected to 8 others.
+    This grid of nodes has periodic boundary conditions (torus)
     Inputs:
-        S - Substrate type object, already infected
-        beta, gam, rho - parameters of SIS simulation
-        nobs - number of observations of the equilibrium state
-        res - if True, reset the state of the Substrate S to the original state (before simulation)
-        resid - if True, return a list of Residual networks...
-        debug - if True, print debugging messages
-    Output:
-        data - array of I* during the equilibrium endemic state
+        L : number of nodes on each edge of the grid
+    Outputs:
+        g : grid graph, networkx undirected graph object
     """
-    dataS = [] # Susceptibles equilibrium data
-    dataI = [] # Infecteds equilibrium data
-    if resid: resid_list = [] # List of residual networks
-    startstate = S.GetStatus()
-    # First we equilibrate
-    if debug: print 'Begin equilibrating', beta, asctime()
-    for i in range(25):
-        S.SIRSupdate(beta, gam, rho, nsteps = int(5./gam))
-        if len(S.Infecteds()) == 0:
-            if res: S.SetStatus(startstate)
-            return numpy.array([[1]*nobs, [0]*nobs])
-    # Now we begin making observations:
-    if debug: print 'Finished equilibrating, begin measurements', beta, asctime()
-    for i in range(nobs):
-        S.SIRSupdate(beta, gam, rho, nsteps = int(5./gam))
-        nI = len(S.Infecteds())
-        nS = len(S.Susceptibles())
-        if nI == 0:
-            data = [0]*nobs
-            if res: S.SetStatus(startstate)
-            return numpy.array([[1]*nobs, [0]*nobs])
-        dataS.append(nS)
-        dataI.append(nI)
-        if resid: resid_list.append(RPk(S, True))
-    if res: S.SetStatus(startstate) # restore to starting state if res is True
-    if debug: print 'Simulation finished', beta, asctime()
-    if resid: return numpy.array([dataS, dataI]), resid_list
-    else: return numpy.array([dataS, dataI])
+    g = nx.Graph()
+    for a in range(L*L):
+        b = (a+L)%(L*L)
+        g.add_edge(a,b)
+        g.add_edge(a, (a+1)%L + L*int(a/L))
+        g.add_edge(a, (b+1)%L + L*int(b/L))
+        g.add_edge(a, (b-1)%L + L*int(b/L))
+    return g
+    
+###----------------------------------------------------------------------------
+# Some extra code, still in development
+###----------------------------------------------------------------------------
+
+#def SimulSIS(S, G, gamma_, beta_, nobs, debug = False):
+#    """
+#    Measure the equilibrium endemic state for the given input parameters
+#    For now, the substrate passed to the simulation is already infected...
+#    """
+#    idict = []
+#    meank = mean_degree(S)
+#    stdk = std_degree(S)
+#    nn = len(S.status) # count number of nodes in the network...  
+#    # First we equilibrate
+#    if debug: print 'Begin equilibrating SIS', beta_, asctime()
+#    for i in range(25):
+#        S.SISupdate(beta_, gamma_, nsteps = int(5./gamma_))
+#        # check to see if the network has entered the endemic state or not...
+#        if len(S.infecteds()) == 0:
+#            idict = np.array([[nn]*nobs, [0]*nobs])
+#            return idict
+#    # Now we begin making observations:
+#    if debug: 
+#        print 'Finished equilibrating, begin SIS measurements', 
+#                beta_, asctime()
+#    for i in range(nobs):
+#        S.SISupdate(beta_, gamma_, nsteps = int(5./gamma_))
+#        nI = len(S.infecteds())
+#        nS = len(S.susceptibles())
+#        if nI == 0:
+#            idict = np.array([[nn]*nobs, [0]*nobs])
+#            return idict
+#        idict.append(np.array([nS, nI]))
+#    return np.array(idict).transpose()
+
+#def ColorMapM(mdata, m2data, alphas, R0s, meank, 
+#              p = True, logx = True, ret = False):
+#    """
+#    Use pcolormesh from matplotlib to create a visualization of the 
+#    phase diagram of the 
+#    
+#    in the form of a heat map.
+#    Use pcolormesh to create a heat plot of mdata/m2data (ie, <m>/<m^2>
+#    Input:  mdata, m2data - Output from DiagramMeasure, data to be visualized
+#            alphas, R0s - numerical values of parameters
+#            plot - Set to True if we want to visualize
+#            Log - set to true to put x (rho) axis on a log scale
+#             This is appropriate, as rho is not zero, and can span large range
+#            Ret - if true, return the inputs to pcolormesh...
+#    Output: Plot a picture if plot is set to True
+#            Output X, Y, C - pcolormesh inputs if Ret input is true
+#    """
+#    X, Y = np.meshgrid(alphas, R0s)
+#    C = np.array([[meank*mdata[rho_, R0]/m2data[rho_, R0] 
+#                for rho_ in alphas] for R0 in R0s])
+#    if plot:
+#       plt.figure()
+#        pcolormesh(X, Y, C)
+#        plt.xlabel('rho/gamma')
+#        if Log: 
+#            plt.xlabel('Log10(rho/gamma)')
+#            plt.semilogx()
+#        plt.ylabel('R_0')
+#        plt.colorbar()
+#        plt.show()
+#        # use plt.clim(vmin=, vmax=) to adjust the colorbar scale...)
+#    if Ret: return X, Y, C
