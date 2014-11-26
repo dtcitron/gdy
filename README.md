@@ -11,6 +11,8 @@ a population susceptible to disease.
 This repository contains:
   gdy.py - The Python package, containing everything needed to simulate SIRS-type
            disease models and produce visualizations of the phase diagram
+           
   gdy_demo.ipynb - iPython notebook demonstrating the use of the package
+  
   README.md - what you're reading right now
   
