@@ -18,6 +18,10 @@
 #  greatly improve the speed of the simulations.  This works best
 #  for graphs with a low density of edges.
 
+#  Updates for later:
+#  1. Need to be able to properly seed the rng used for updates
+#  2. Look at code in graveyard
+
 import cPickle as pickle
 import networkx as nx
 import random
@@ -152,7 +156,7 @@ class Substrate:
 #   Methods for implementing discrete-time stochastic simulation
 ###----------------------------------------------------------------------------        
 
-    def SISupdate(self, beta_, gamma_, nsteps = 1, 
+    def sis_update(self, beta_, gamma_, nsteps = 1, 
                   update = True, ret = False):
         """
         Perform SIS simulation for a fixed number of time steps
@@ -186,7 +190,7 @@ class Substrate:
         if not update: self.setstatus(oldstatus)
         if ret: return self.status
         
-    def SIRSupdate(self, beta_, gamma_, rho_, nsteps = 1, 
+    def sirs_update(self, beta_, gamma_, rho_, nsteps = 1, 
                    update = True, ret = False):
         """
         Perform SIRS simulation for a fixed number of time steps
@@ -249,10 +253,9 @@ def mean_degree(s):
     ks = degree_dist(s)
     return np.sum([1.*i*ks[i] for i in ks])/len(s.status)
     
-     
 def std_degree(s):
     """
-    Calculate the degree standard deviation degree of a Substrate
+    Calculate the second moment of a degree distribution
     Inputs:
         s: Substrate object
     Outputs:
@@ -326,7 +329,6 @@ def residual_p_degree(s, ra = True):
 # The following functions produce these different order parameters and
 # allow for straightforward phase diagram generation and visualization.
 ###--------------------------------------------------------------------
-
 
 def sirs_diagram(G, gamma_ = .005, R0s = None, alphas = None, 
                  nobs = 10, mft = True, prev = None, debug = False):
@@ -469,7 +471,7 @@ def simsirs(S, G, gamma_, beta_, rho_, nobs, mft = True, debug = False):
     if debug: 
         print 'Begin equilibrating SIRS', beta_, rho_, asctime()
     for i in range(25):
-        S.SIRSupdate(beta_, gamma_, rho_, nsteps = int(5./gamma_))
+        S.sirs_update(beta_, gamma_, rho_, nsteps = int(5./gamma_))
         # Check to see that the quasistationary state has not yet died
         if len(S.infecteds()) == 0:
             idict = np.array([[nn]*nobs, [0]*nobs])
@@ -479,10 +481,10 @@ def simsirs(S, G, gamma_, beta_, rho_, nobs, mft = True, debug = False):
             return idict, mdict, m2dict, ccdict
     # Begin making observations of the quasistationary state
     if debug: 
-        print 'Finished equilibrating, begin SIRS measurements', 
-              beta_, rho_, asctime()
+        print 'Finished equilibrating, begin SIRS measurements', \
+        beta_, rho_, asctime()
     for i in range(nobs):
-        S.SIRSupdate(beta_, gamma_, rho_, nsteps = int(5./gamma_))
+        S.sirs_update(beta_, gamma_, rho_, nsteps = int(5./gamma_))
         nI = len(S.infecteds())
         nS = len(S.susceptibles())
         # Check to see that the quasistationary state has not yet died
@@ -492,15 +494,15 @@ def simsirs(S, G, gamma_, beta_, rho_, nobs, mft = True, debug = False):
             m2dict = np.array([stdk]*nobs)
             ccdict = np.array([1]*nobs)
             return idict, mdict, m2dict, ccdict
-        rpk = RPk(S, True)
+        rpk = residual_p_degree(S, True)
         idict.append(np.array([nS, nI]))
         mdict.append(np.dot(rpk[0], rpk[1]))
         m2dict.append(np.dot(rpk[0]**2, rpk[1]))
         ccdict.append(connectedcomponents(G, S))
-    return np.array(idict).transpose(), np.array(mdict), 
+    return np.array(idict).transpose(), np.array(mdict), \
            np.array(m2dict), np.array(ccdict)
 
-def connectedcomponents(G, S):
+def connectedcomponents(g, s):
     """
     Find the number of connected components of the residual graph of G.
     The residual graph is found by identifying all Susceptible and 
@@ -513,9 +515,9 @@ def connectedcomponents(G, S):
     Outputs:
         Number of residual graph connected components; integer
     """
-    resids = np.hstack([S.infecteds(), S.susceptibles()])
-    g = G.subgraph(resids)
-    return len(nx.connected_component_subgraphs(g))
+    resids = np.hstack([s.infecteds(), s.susceptibles()])
+    gsub = g.subgraph(resids)
+    return len(nx.connected_component_subgraphs(gsub))
     
 ###----------------------------------------------------------------------------
 ### Measuring the simulation results
@@ -527,7 +529,7 @@ def data_params(idata):
     parameters alphas and R0s.  The input is a single one of the 
     outputs (such as idata or mdata) with the form {(alpha, R0):data}
     Inputs:
-        idata : dictionary from output of sirs_diagram
+        idata : dictionary from output of sirs_diagram()
     Outputs:
         alphas: array vector of alpha=rho/gamma
         R0S   : array vector of R0<k>/gamma
@@ -578,11 +580,11 @@ def fluct(idata, index = None):
     if index != None:
         for key in idata:
             h = sorted(list(idata[key][index]))
-            new[key] = (h[int(.95*len(h))-1]-h[int(.05*len(h))-1])/2.
+            new[key] = np.abs((h[int(.05*len(h))-1]-h[int(.95*len(h))-1])/2.)
     else:
         for key in idata:
             h = sorted(list(idata[key]))
-            new[key] = (h[int(.95*len(h))-1]-h[int(.05*len(h))-1])/2.
+            new[key] = np.abs((h[int(.05*len(h))-1]-h[int(.95*len(h))-1])/2.)
     return new
     
 def frac_fluct(idata, index = None):
@@ -630,12 +632,12 @@ def colormap(data, alphas, R0s,
                 arguments.  These are returned only if ret==True
     """
     X, Y = np.meshgrid(alphas, R0s)
-    C = np.array([[idata[rho_, R0] for rho_ in alphas] for R0 in R0s])
-    if plot:
+    C = np.array([[data[rho_, R0] for rho_ in alphas] for R0 in R0s])
+    if p:
         plt.figure()
         pcolormesh(X, Y, C)
         plt.xlabel('rho/gamma')
-        if Log: 
+        if logx: 
             plt.semilogx()
         plt.ylabel('R_0')
         plt.colorbar()
@@ -662,7 +664,7 @@ def poisson_graph(n = 1000, p = .005, seed = None):
         g : Connected Gnp-type graph, networkx undirected graph object
     """
     g = nx.fast_gnp_random_graph(n, p, seed)
-    gs = nx.connected_component_subgraphs(G)
+    gs = nx.connected_component_subgraphs(g)
     for subg in gs[1:]: # connect all disconnected components...
         node1 = random.choice(gs[0].nodes())
         node2 = random.choice(g.nodes())
@@ -723,7 +725,7 @@ def plane_graph_nn(L = 100):
 #    # First we equilibrate
 #    if debug: print 'Begin equilibrating SIS', beta_, asctime()
 #    for i in range(25):
-#        S.SISupdate(beta_, gamma_, nsteps = int(5./gamma_))
+#        S.sis_update(beta_, gamma_, nsteps = int(5./gamma_))
 #        # check to see if the network has entered the endemic state or not...
 #        if len(S.infecteds()) == 0:
 #            idict = np.array([[nn]*nobs, [0]*nobs])
@@ -733,7 +735,7 @@ def plane_graph_nn(L = 100):
 #        print 'Finished equilibrating, begin SIS measurements', 
 #                beta_, asctime()
 #    for i in range(nobs):
-#        S.SISupdate(beta_, gamma_, nsteps = int(5./gamma_))
+#        S.sis_update(beta_, gamma_, nsteps = int(5./gamma_))
 #        nI = len(S.infecteds())
 #        nS = len(S.susceptibles())
 #        if nI == 0:
