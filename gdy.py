@@ -3,7 +3,7 @@
 #  
 #
 #  Created by Daniel Citron on 9/06/13.
-#  Most recent update: 11/24/14
+#  Most recent update: 11/24/14 (PEP compliance)
 #   
 #  gdy = Graph Dynamics
 #  
@@ -668,7 +668,7 @@ def poisson_graph(n = 1000, p = .005, seed = None):
     gs = nx.connected_component_subgraphs(g)
     for subg in gs[1:]: # connect all disconnected components...
         node1 = random.choice(gs[0].nodes())
-        node2 = random.choice(g.nodes())
+        node2 = random.choice(subg.nodes())
         g.add_edge(node1, node2)
     return g
     
@@ -689,7 +689,6 @@ def plane_graph(L = 100):
         g.add_edge(a, (a+1)%L + L*int(a/L))
     return g
     
-
 def plane_graph_nn(L = 100):
     """
     This function defines an LxL grid of nodes and connects all
